@@ -91,6 +91,14 @@ sys_uptime(void)
 }
 
 int
+sys_halt(void){
+  char *p = "Shutdown";
+  for( ; *p; p++)
+    outb(0x8900, *p);
+  return 0;
+}
+
+int
 sys_alarm(void)
 {
   int ticks;
