@@ -54,6 +54,15 @@ trap(struct trapframe *tf)
       wakeup(&ticks);
       release(&tickslock);
     }
+      if(proc && (tf->cs & 3) == 3){
+        proc->ticks++;
+        if(proc->alarmticks == proc->ticks){
+          proc->ticks = 0;
+          tf->esp -= 4;
+          *((uint *)(tf->esp)) = tf->eip;
+          tf->eip =(uint) proc->alarmhandler;
+        }
+      }
     lapiceoi();
     break;
   case T_IRQ0 + IRQ_IDE:
@@ -86,6 +95,30 @@ trap(struct trapframe *tf)
               tf->trapno, cpuid(), tf->eip, rcr2());
       panic("trap");
     }
+      
+  if(tf->trapno == T_PGFLT){
+    // rcr2() is the address causing page fault
+    // should only allocate for this page
+    char * mem;
+    uint a;
+
+    a = PGROUNDDOWN(rcr2());
+
+    mem = kalloc();
+    if(mem == 0){
+        cprintf("allocuvm out of memory\n");
+        cprintf("pid %d %s: trap %d err %d on cpu %d "
+            "eip 0x%x addr 0x%x--kill proc\n",
+            proc->pid, proc->name, tf->trapno, tf->err, cpu->id, tf->eip,
+            rcr2());
+        proc->killed = 1;
+        return;
+    }
+    memset(mem, 0, PGSIZE);
+    mappages(proc->pgdir, (void *)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
+    return;
+  }      
+      
     // In user space, assume process misbehaved.
     cprintf("pid %d %s: trap %d err %d on cpu %d "
             "eip 0x%x addr 0x%x--kill proc\n",
