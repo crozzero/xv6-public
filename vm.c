@@ -21,12 +21,21 @@ seginit(void)
   // Cannot share a CODE descriptor for both kernel and user
   // because it would have to have DPL_USR, but the CPU forbids
   // an interrupt from CPL=0 to DPL=3.
-  c = &cpus[cpuid()];
+  c = &cpus[cpunum()];
   c->gdt[SEG_KCODE] = SEG(STA_X|STA_R, 0, 0xffffffff, 0);
   c->gdt[SEG_KDATA] = SEG(STA_W, 0, 0xffffffff, 0);
   c->gdt[SEG_UCODE] = SEG(STA_X|STA_R, 0, 0xffffffff, DPL_USER);
   c->gdt[SEG_UDATA] = SEG(STA_W, 0, 0xffffffff, DPL_USER);
+
+  // Map cpu and proc -- these are private per cpu.
+  c->gdt[SEG_KCPU] = SEG(STA_W, &c->cpu, 8, 0);
+
   lgdt(c->gdt, sizeof(c->gdt));
+  loadgs(SEG_KCPU << 3);
+
+  // Initialize cpu-local storage.
+  cpu = c;
+  proc = 0;
 }
 
 // Return the address of the PTE in page table pgdir
@@ -57,7 +66,7 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned.
-static int
+int
 mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
 {
   char *a, *last;
@@ -128,15 +137,13 @@ setupkvm(void)
     panic("PHYSTOP too high");
   for(k = kmap; k < &kmap[NELEM(kmap)]; k++)
     if(mappages(pgdir, k->virt, k->phys_end - k->phys_start,
-                (uint)k->phys_start, k->perm) < 0) {
-      freevm(pgdir);
+                (uint)k->phys_start, k->perm) < 0)
       return 0;
-    }
   return pgdir;
 }
 
 // Allocate one page table for the machine for the kernel address
-// space for scheduler processes.
+// space for scheduler processes. Called in main.c.
 void
 kvmalloc(void)
 {
@@ -156,23 +163,17 @@ switchkvm(void)
 void
 switchuvm(struct proc *p)
 {
-  if(p == 0)
-    panic("switchuvm: no process");
-  if(p->kstack == 0)
-    panic("switchuvm: no kstack");
-  if(p->pgdir == 0)
-    panic("switchuvm: no pgdir");
-
   pushcli();
-  mycpu()->gdt[SEG_TSS] = SEG16(STS_T32A, &mycpu()->ts,
-                                sizeof(mycpu()->ts)-1, 0);
-  mycpu()->gdt[SEG_TSS].s = 0;
-  mycpu()->ts.ss0 = SEG_KDATA << 3;
-  mycpu()->ts.esp0 = (uint)p->kstack + KSTACKSIZE;
+  cpu->gdt[SEG_TSS] = SEG16(STS_T32A, &cpu->ts, sizeof(cpu->ts)-1, 0);
+  cpu->gdt[SEG_TSS].s = 0;
+  cpu->ts.ss0 = SEG_KDATA << 3;
+  cpu->ts.esp0 = (uint)proc->kstack + KSTACKSIZE;
   // setting IOPL=0 in eflags *and* iomb beyond the tss segment limit
   // forbids I/O instructions (e.g., inb and outb) from user space
-  mycpu()->ts.iomb = (ushort) 0xFFFF;
+  cpu->ts.iomb = (ushort) 0xFFFF;
   ltr(SEG_TSS << 3);
+  if(p->pgdir == 0)
+    panic("switchuvm: no pgdir");
   lcr3(V2P(p->pgdir));  // switch to process's address space
   popcli();
 }
@@ -265,7 +266,7 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
   for(; a  < oldsz; a += PGSIZE){
     pte = walkpgdir(pgdir, (char*)a, 0);
     if(!pte)
-      a = PGADDR(PDX(a) + 1, 0, 0) - PGSIZE;
+      a += (NPTENTRIES - 1) * PGSIZE;
     else if((*pte & PTE_P) != 0){
       pa = PTE_ADDR(*pte);
       if(pa == 0)
@@ -382,11 +383,3 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   }
   return 0;
 }
-
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
-
